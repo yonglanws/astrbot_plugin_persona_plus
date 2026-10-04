@@ -1,0 +1,5 @@
+name: astrbot_plugin_persona_plus
+display_name: Persona Plus
+desc: 专注于人格切换：指令/序号/别名/模糊匹配切换、交互式人格列表、群聊人格持久化与回复前缀
+version: v1.6.0
+author: Railgun19457

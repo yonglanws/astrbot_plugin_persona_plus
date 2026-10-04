@@ -1,0 +1,35 @@
+{
+    "manage_wait_timeout_seconds": {
+        "description": "人格列表等待超时（秒）",
+        "hint": "交互式人格切换（pp）等待用户回复的最长时间，超时后自动取消",
+        "type": "int",
+        "default": 60
+    },
+    "admin_commands": {
+        "description": "需要管理员权限的指令",
+        "hint": "勾选 switch 后，切换人格仅限管理员操作；不勾选则所有人可切换",
+        "type": "list",
+        "options": [
+            "switch"
+        ],
+        "default": []
+    },
+    "enable_auto_switch_announce": {
+        "description": "切换提示",
+        "hint": "切换人格时，是否发送提示消息",
+        "type": "bool",
+        "default": true
+    },
+    "persona_order": {
+        "description": "人格自定义排序",
+        "hint": "按从上到下的顺序填写人格ID，不在列表中的自动排在末尾",
+        "type": "list",
+        "default": []
+    },
+    "persona_groups": {
+        "description": "人格分组",
+        "hint": "每行格式：分组名:人格ID1,人格ID2（例如 常用:晓山瑞希,助手）。分组决定人格列表图片的布局",
+        "type": "list",
+        "default": []
+    }
+}
