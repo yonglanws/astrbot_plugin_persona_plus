@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import difflib
+import json
 import os
 import time
 from pathlib import Path
@@ -38,6 +39,7 @@ class PersonaPlus(Star):
         data_dir = StarTools.get_data_dir("astrbot_plugin_persona_plus")
         self.user_store = GroupPersonaStore(data_dir / "group_personas.json")
         self._image_output_dir = str(data_dir / "images")
+        self._guided_path = data_dir / "guided_umos.json"
 
         self.settings: PersonaPlusSettings
         self.manage_wait_timeout = 60
@@ -45,9 +47,12 @@ class PersonaPlus(Star):
         self.auto_switch_announce = True
         self._tasks: set[asyncio.Task] = set()
         self._active_switches: set[str] = set()
+        self._guided_umos: set[str] = set()
+        self._guided_store: set[str] = set()
         self._char_store = CharacterStore(Path(__file__).resolve().parent / "characters.json")
 
         self._load_config(config)
+        self._load_guided_store()
         self._cleanup_old_images()
 
     def _load_config(self, config) -> None:
@@ -80,6 +85,47 @@ class PersonaPlus(Star):
         os.makedirs(self._image_output_dir, exist_ok=True)
         return self._image_output_dir
 
+    # ==================== 首次引导状态（去重） ====================
+    def _load_guided_store(self) -> None:
+        """读取已引导过的会话列表（重启后不重复引导）。"""
+        try:
+            raw = json.loads(self._guided_path.read_text(encoding="utf-8"))
+            if isinstance(raw, list):
+                self._guided_store = {str(x) for x in raw if x}
+        except (OSError, json.JSONDecodeError):
+            self._guided_store = set()
+
+    def _save_guided_store(self) -> None:
+        try:
+            self._guided_path.parent.mkdir(parents=True, exist_ok=True)
+            self._guided_path.write_text(
+                json.dumps(sorted(self._guided_store), ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+        except OSError as exc:
+            logger.warning("Persona+ 写入引导状态失败：%s", exc)
+
+    def _is_guide_pending(self, umo: str) -> bool:
+        """该会话是否已经发过"未选择人格"引导。
+
+        内存标记防并发；持久化标记防重启后重复引导（该会话仍未
+        选择人格时，重启后只引导一次）。
+        """
+        if umo in self._guided_umos:
+            return True
+        return umo in self._guided_store
+
+    def _mark_guide_pending(self, umo: str) -> None:
+        self._guided_umos.add(umo)
+        self._guided_store.add(umo)
+        self._save_guided_store()
+
+    def _clear_guide_pending(self, umo: str) -> None:
+        """用户选定人格后清除引导标记，恢复"未选择"判定。"""
+        self._guided_umos.discard(umo)
+        self._guided_store.discard(umo)
+        self._save_guided_store()
+
     @filter.on_astrbot_loaded()
     async def on_astrbot_loaded(self):
         logger.info("Persona+ 已就绪，群聊人格存储：%d 条", len(self.user_store.get_all()))
@@ -103,16 +149,23 @@ class PersonaPlus(Star):
             logger.info("Persona+ [LLM请求] 处理开始: umo=%s", umo)
 
             saved_persona_id = self.user_store.get(umo)
-            target_persona_id = (
-                saved_persona_id if saved_persona_id else DEFAULT_PERSONA_ID
-            )
             if not saved_persona_id:
-                self.user_store.set(umo, target_persona_id)
-                logger.info(
-                    "Persona+ [LLM请求] %s 不在持久化存储中，已写入默认人格: %s",
-                    umo,
-                    target_persona_id,
-                )
+                # 该会话从未选择过人格：不静默写入默认人格，而是
+                # 一次性发送人格切换图片与提示，让用户主动选择。
+                if not self._is_guide_pending(umo):
+                    self._mark_guide_pending(umo)
+                    logger.info(
+                        "Persona+ [LLM请求] %s 未选择人格，发送人格切换引导", umo
+                    )
+                    await self._start_interactive_switch(
+                        event,
+                        intro="当前尚未选择人格，请查看下方人格列表，直接发送序号即可切换人格。",
+                        stop_event=False,
+                    )
+                # 本次请求仍沿用默认人格，保证回复正常
+                target_persona_id = DEFAULT_PERSONA_ID
+            else:
+                target_persona_id = saved_persona_id
 
             try:
                 persona = await self.persona_mgr.get_persona(target_persona_id)
@@ -545,6 +598,9 @@ class PersonaPlus(Star):
             persona_id, require_existing=True
         )
 
+        # 用户已做出选择：清除"未选择人格"的引导标记
+        self._clear_guide_pending(event.unified_msg_origin)
+
         if announce is None and self.auto_switch_announce:
             announce = f"已切换人格为 {resolved_persona_id}"
 
@@ -558,7 +614,13 @@ class PersonaPlus(Star):
         )
 
     # ==================== 交互式人格切换 ====================
-    async def _start_interactive_switch(self, event: AstrMessageEvent) -> None:
+    async def _start_interactive_switch(
+        self,
+        event: AstrMessageEvent,
+        intro: str = "请查看下方人格列表，直接发送序号即可切换人格。",
+        *,
+        stop_event: bool = True,
+    ) -> None:
         umo = event.unified_msg_origin
         if umo in self._active_switches:
             return
@@ -585,7 +647,7 @@ class PersonaPlus(Star):
             )
             result = event.make_result()
             result.chain = [
-                Comp.Plain("请查看下方人格列表，直接发送序号即可切换人格。"),
+                Comp.Plain(intro),
                 Comp.Image.fromFileSystem(image_path),
             ]
             await event.send(result)
@@ -660,7 +722,11 @@ class PersonaPlus(Star):
         task = asyncio.create_task(run_switch_wait())
         self._tasks.add(task)
         task.add_done_callback(lambda t: self._tasks.discard(t))
-        event.stop_event()
+        # LLM 请求钩子里发起的引导（on_llm_request）不能 stop_event：
+        # 该钩子由本体内部调用，事件尚未进入插件处理阶段，停止传播会
+        # 中断整条消息管线，导致本次 LLM 回复不发送。
+        if stop_event:
+            event.stop_event()
 
     # ==================== 事件监听器：快捷切换（高优先级） ====================
     @filter.event_message_type(filter.EventMessageType.ALL, priority=999)
