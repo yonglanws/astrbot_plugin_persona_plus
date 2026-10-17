@@ -14,7 +14,11 @@ from astrbot.api.star import Context, Star, StarTools
 
 from .core.character_store import CharacterStore
 from .core.config import PersonaPlusSettings, load_settings
-from .core.image_renderer import compute_display_order, render_persona_switch_list
+from .core.image_renderer import (
+    EXCLUDE_PERSONA_IDS,
+    compute_display_order,
+    render_persona_switch_list,
+)
 from .core.permissions import check_permission
 from .core.session_flows import GroupScopedSessionFilter
 from .core.switching import DEFAULT_PERSONA_ID, reset_all_personas, switch_persona
@@ -25,8 +29,6 @@ from astrbot.core.utils.session_waiter import SessionController, session_waiter
 
 class PersonaPlus(Star):
     """专注于人格切换的插件。"""
-
-    EXCLUDE_PERSONA_PREFIX = {"晓山瑞希"}
 
     def __init__(self, context: Context, config=None):
         super().__init__(context)
@@ -337,6 +339,7 @@ class PersonaPlus(Star):
         if not personas:
             return "当前没有人格，请先在控制台或通过指令创建。", []
 
+        personas = [p for p in personas if p.persona_id not in EXCLUDE_PERSONA_IDS]
         persona_ids = [p.persona_id for p in personas]
         lines = ["请直接发送序号选择人格：", ""]
         for idx, persona in enumerate(personas, start=1):
@@ -361,13 +364,18 @@ class PersonaPlus(Star):
         return parts[:-1], parts[-1]
 
     async def _ordered_personas(self) -> list:
-        """按配置排序并应用分组显示顺序后的人格列表（序号即显示编号）。"""
+        """按配置排序并应用分组显示顺序后的人格列表（序号即显示编号）。
+
+        与图片渲染保持一致：剔除内置 default 等不渲染的人格，
+        否则序号解析会比图片上的编号错位。
+        """
         personas = await self.persona_mgr.get_all_personas()
         if not personas:
             return []
-        return compute_display_order(
+        ordered = compute_display_order(
             self._sort_personas(personas), self.settings.persona_groups or None
         )
+        return [p for p in ordered if p.persona_id not in EXCLUDE_PERSONA_IDS]
 
     async def _display_index_map(self) -> dict[str, int]:
         """persona_id → 人格列表显示编号 的映射。"""
@@ -564,7 +572,12 @@ class PersonaPlus(Star):
 
         personas = self._sort_personas(personas)
         ordered_personas = compute_display_order(personas, self.settings.persona_groups or None)
-        persona_ids = [p.persona_id for p in ordered_personas]
+        # 与图片渲染、_ordered_personas 保持一致：剔除不渲染的 default
+        persona_ids = [
+            p.persona_id
+            for p in ordered_personas
+            if p.persona_id not in EXCLUDE_PERSONA_IDS
+        ]
 
         try:
             image_path = render_persona_switch_list(
@@ -789,8 +802,6 @@ class PersonaPlus(Star):
         try:
             persona_id = event.get_extra("_persona_plus_request_pid")
             if not persona_id:
-                return
-            if persona_id in self.EXCLUDE_PERSONA_PREFIX:
                 return
 
             result = event.get_result()
