@@ -130,6 +130,36 @@ class PersonaPlus(Star):
     async def on_astrbot_loaded(self):
         logger.info("Persona+ 已就绪，群聊人格存储：%d 条", len(self.user_store.get_all()))
 
+    # ==================== 等待LLM请求：未选择人格时引导切换 ====================
+    @filter.on_waiting_llm_request(priority=999)
+    async def on_waiting_llm_request(self, event: AstrMessageEvent):
+        """从未选择人格的会话：发送人格切换引导并终止本次 LLM 请求。
+
+        该钩子在本体 build_main_agent 与会话锁之前触发，此时 stop_event
+        会让本体直接返回：不创建对话记录、不调用 LLM、不加回复前缀，
+        用户只会收到引导消息，不会多出一次默认人格的对话。
+        已注册的交互式切换流程（session_waiter）不受影响，用户随后
+        发送序号即可完成选择。
+        """
+        umo = event.unified_msg_origin
+        if self.user_store.get(umo) or self._is_guide_pending(umo):
+            return
+
+        self._mark_guide_pending(umo)
+        logger.info("Persona+ [等待请求] %s 未选择人格，发送人格切换引导", umo)
+        try:
+            await self._start_interactive_switch(
+                event,
+                intro="当前尚未选择人格，请查看下方人格列表，直接发送序号即可切换人格。",
+                stop_event=True,
+            )
+        except Exception:
+            # 失败时仅移除内存标记，允许下次重试；持久化标记保留，
+            # 防止渲染持续失败时每条消息都重复引导。
+            logger.exception("Persona+ 引导流程异常")
+            self._guided_umos.discard(umo)
+            raise
+
     # ==================== LLM请求前：应用保存的人格（最高优先级） ====================
     @filter.on_llm_request(priority=999)
     async def on_llm_request(self, event: AstrMessageEvent, req: ProviderRequest):
@@ -141,6 +171,8 @@ class PersonaPlus(Star):
         仅当快照落后（切换竞态窗口）时走 _align_request_snapshot
         定点对齐，保证新人格必定生效。
 
+        未选择人格时的引导在 on_waiting_llm_request 中完成，走到这里
+        说明本次请求已放行（store 已有值或异常窗口），沿用默认人格。
         注意：这里只读取存储、修正本次请求，不写"当前对话"，
         避免与切换指令并发时把新人格改回旧值。
         """
@@ -149,23 +181,9 @@ class PersonaPlus(Star):
             logger.info("Persona+ [LLM请求] 处理开始: umo=%s", umo)
 
             saved_persona_id = self.user_store.get(umo)
-            if not saved_persona_id:
-                # 该会话从未选择过人格：不静默写入默认人格，而是
-                # 一次性发送人格切换图片与提示，让用户主动选择。
-                if not self._is_guide_pending(umo):
-                    self._mark_guide_pending(umo)
-                    logger.info(
-                        "Persona+ [LLM请求] %s 未选择人格，发送人格切换引导", umo
-                    )
-                    await self._start_interactive_switch(
-                        event,
-                        intro="当前尚未选择人格，请查看下方人格列表，直接发送序号即可切换人格。",
-                        stop_event=False,
-                    )
-                # 本次请求仍沿用默认人格，保证回复正常
-                target_persona_id = DEFAULT_PERSONA_ID
-            else:
-                target_persona_id = saved_persona_id
+            target_persona_id = (
+                saved_persona_id if saved_persona_id else DEFAULT_PERSONA_ID
+            )
 
             try:
                 persona = await self.persona_mgr.get_persona(target_persona_id)
@@ -722,9 +740,9 @@ class PersonaPlus(Star):
         task = asyncio.create_task(run_switch_wait())
         self._tasks.add(task)
         task.add_done_callback(lambda t: self._tasks.discard(t))
-        # LLM 请求钩子里发起的引导（on_llm_request）不能 stop_event：
-        # 该钩子由本体内部调用，事件尚未进入插件处理阶段，停止传播会
-        # 中断整条消息管线，导致本次 LLM 回复不发送。
+        # stop_event 只影响当前事件：终止本体对它的后续处理（LLM 调用、
+        # 回复装饰与发送），不会影响 session_waiter 接收后续新消息。
+        # 引导路径（on_waiting_llm_request）与指令路径都会传入 True。
         if stop_event:
             event.stop_event()
 
@@ -857,6 +875,10 @@ class PersonaPlus(Star):
             persona_mgr=self.persona_mgr,
             user_store=self.user_store,
         )
+        # 人格选择已被清空：同步清除引导标记，让所有会话重新进入
+        # "未选择人格" 状态，下次触发时重新引导。
+        for umo in list(self._guided_umos):
+            self._clear_guide_pending(umo)
         yield event.plain_result(f"已重置 {count} 个用户的人格状态，所有对话恢复为默认人格。")
 
     # ==================== 消息装饰：人格前缀（仅LLM对话回复）（高优先级） ====================
