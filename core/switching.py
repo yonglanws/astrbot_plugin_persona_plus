@@ -3,6 +3,7 @@ from __future__ import annotations
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, MessageEventResult
 from astrbot.api.star import Context
+from astrbot.core.utils.active_event_registry import active_event_registry
 
 from .user_persona_store import GroupPersonaStore
 
@@ -18,22 +19,38 @@ async def switch_persona(
     persona_id: str,
     announce: str | None = None,
 ) -> MessageEventResult | None:
-    """切换人格：写入持久化存储，并新建一条绑定该人格的对话。
+    """切换人格：写入持久化存储，并清空当前对话的历史与人格绑定。
 
-    通过"新建对话"而不是原地修改当前对话来切换，避免与进行中的
-    LLM 请求竞态：进行中的请求持有旧对话的快照 cid，其结果只会
-    落回旧对话，不会污染新对话；旧对话连同历史保留，可在 WebUI 查看。
+    采用与内置 /reset 一致的做法：先终止该会话正在进行的事件与
+    Agent 生成，再把当前对话的历史清空并绑定新人格。若不先终止，
+    生成中的请求结束时会把旧人格的历史原样写回，导致"前缀是新
+    人格、内容还是旧人格"的错位。
     """
     await persona_mgr.get_persona(persona_id)
 
     umo = event.unified_msg_origin
     user_store.set(umo, persona_id)
 
-    await context.conversation_manager.new_conversation(
-        unified_msg_origin=umo,
-        persona_id=persona_id,
-    )
-    logger.info("Persona+ %s 已切换至人格 %s（新建对话）", umo, persona_id)
+    active_event_registry.stop_all(umo, exclude=event)
+
+    conv_mgr = context.conversation_manager
+    cid = await conv_mgr.get_curr_conversation_id(umo)
+    if cid:
+        await conv_mgr.update_conversation(
+            unified_msg_origin=umo,
+            conversation_id=cid,
+            persona_id=persona_id,
+            history=[],
+        )
+        logger.info(
+            "Persona+ %s 已切换至人格 %s（清空当前对话 %s）", umo, persona_id, cid
+        )
+    else:
+        await conv_mgr.new_conversation(
+            unified_msg_origin=umo,
+            persona_id=persona_id,
+        )
+        logger.info("Persona+ %s 已切换至人格 %s（新建对话）", umo, persona_id)
 
     if announce:
         return event.plain_result(announce)
@@ -64,6 +81,8 @@ async def reset_all_personas(
         pass
 
     for umo in list(known_origins):
+        # 终止进行中的生成，避免其结束时把旧人格历史写回
+        active_event_registry.stop_all(umo)
         try:
             conversations = await context.conversation_manager.get_conversations(
                 unified_msg_origin=umo
@@ -76,6 +95,7 @@ async def reset_all_personas(
                     unified_msg_origin=conv.unified_msg_origin,
                     conversation_id=conv.cid,
                     persona_id=target_persona_id,
+                    history=[],
                 )
                 cleared += 1
             except Exception:  # noqa: BLE001
