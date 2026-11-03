@@ -201,6 +201,9 @@ class PersonaPlus(Star):
 
             event.set_extra("_persona_plus_llm", True)
             event.set_extra("_persona_plus_request_pid", target_persona_id)
+            # 每次 LLM 请求重置前缀标记：本轮对话（含工具调用的多段结果）
+            # 只会加一次前缀
+            event.set_extra("_persona_plus_prefixed", False)
 
             conv = getattr(req, "conversation", None)
             snapshot_persona_id = getattr(conv, "persona_id", None) if conv else None
@@ -882,9 +885,36 @@ class PersonaPlus(Star):
         yield event.plain_result(f"已重置 {count} 个用户的人格状态，所有对话恢复为默认人格。")
 
     # ==================== 消息装饰：人格前缀（仅LLM对话回复）（高优先级） ====================
+    @staticmethod
+    def _is_llm_result(result) -> bool:
+        """判断结果是否为 LLM 生成的回复（排除插件/工具状态等普通结果）。"""
+        fn = getattr(result, "is_llm_result", None)
+        if callable(fn):
+            try:
+                return bool(fn())
+            except Exception:  # noqa: BLE001
+                pass
+        content_type = getattr(result, "result_content_type", None)
+        return getattr(content_type, "name", "") in {
+            "LLM_RESULT",
+            "STREAMING_RESULT",
+            "STREAMING_FINISH",
+        }
+
     @filter.on_decorating_result(priority=999)
     async def on_decorating_result(self, event: AstrMessageEvent):
+        """给 LLM 回复加人格前缀，每轮对话最多一次。
+
+        本体管线是洋葱模型：ProcessStage 每次 yield 都会让装饰与回复
+        阶段重跑一遍。Agent 工具调用场景下，模型"调用工具前的说明"和
+        "最终回复"是同一 event 上先后独立的结果，若按 event 无差别加
+        前缀，一轮就会出现多个 [人格] 前缀（配合分段回复更明显）。
+        因此这里以 event 级标记保证一轮只加一次，并且只装饰 LLM 结果，
+        不碰插件自己发出的消息与工具状态消息。
+        """
         if not event.get_extra("_persona_plus_llm"):
+            return
+        if event.get_extra("_persona_plus_prefixed"):
             return
 
         try:
@@ -895,12 +925,15 @@ class PersonaPlus(Star):
             result = event.get_result()
             if not result or not result.chain:
                 return
+            if not self._is_llm_result(result):
+                return
 
+            prefix = f"[{persona_id}]"
             for component in result.chain:
                 if isinstance(component, Comp.Plain) and component.text.strip():
-                    prefix = f"[{persona_id}]"
                     if not component.text.startswith(prefix):
                         component.text = f"{prefix}{component.text}"
+                    event.set_extra("_persona_plus_prefixed", True)
                     break
         except Exception:  # noqa: BLE001
             logger.debug("Persona+ 人格前缀装饰失败，忽略")
