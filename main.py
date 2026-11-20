@@ -47,6 +47,10 @@ class PersonaPlus(Star):
         self.auto_switch_announce = True
         self._tasks: set[asyncio.Task] = set()
         self._active_switches: set[str] = set()
+        # 人格列表图片：按"人格顺序 + 分组配置"缓存的最近产物（路径, 生成时间）
+        self._render_cache: dict[tuple, tuple[str, float]] = {}
+        self._render_cache_ttl = 300
+        self._render_lock = asyncio.Lock()
         self._guided_umos: set[str] = set()
         self._guided_store: set[str] = set()
         self._char_store = CharacterStore(Path(__file__).resolve().parent / "characters.json")
@@ -67,19 +71,39 @@ class PersonaPlus(Star):
             sorted(self.admin_commands),
         )
 
-    def _cleanup_old_images(self, max_age: int = 3600) -> None:
+    def _cleanup_old_images(self, max_age: int = 3600, max_files: int = 20) -> None:
+        """清理渲染产物：先按年龄，再按数量保留最新 max_files 张。
+
+        原先只在插件初始化时调用一次，运行期产物只增不减；现在每次
+        渲染后也会调用，两次渲染间隔短于 max_age 时靠数量上限兜底。
+        """
         img_dir = Path(self._image_output_dir)
         if not img_dir.exists():
             return
         now = time.time()
+        recent: list[tuple[float, Path]] = []
         for f in img_dir.iterdir():
-            if f.is_file() and f.suffix.lower() in (".png", ".jpg", ".jpeg"):
-                age = now - f.stat().st_mtime
-                if age > max_age:
-                    try:
-                        f.unlink()
-                    except OSError:
-                        pass
+            if not (f.is_file() and f.suffix.lower() in (".png", ".jpg", ".jpeg")):
+                continue
+            try:
+                mtime = f.stat().st_mtime
+            except OSError:
+                continue
+            if now - mtime > max_age:
+                self._unlink_image(f)
+            else:
+                recent.append((mtime, f))
+        if len(recent) > max_files:
+            recent.sort(key=lambda item: item[0])
+            for _, f in recent[: len(recent) - max_files]:
+                self._unlink_image(f)
+
+    @staticmethod
+    def _unlink_image(path: Path) -> None:
+        try:
+            path.unlink()
+        except OSError:
+            pass
 
     def _get_image_output_dir(self) -> str:
         os.makedirs(self._image_output_dir, exist_ok=True)
@@ -207,7 +231,14 @@ class PersonaPlus(Star):
 
             conv = getattr(req, "conversation", None)
             snapshot_persona_id = getattr(conv, "persona_id", None) if conv else None
-            if snapshot_persona_id != target_persona_id:
+            # 4.30 的 prompt 用的是会话 override，构建阶段解析后写在
+            # event 的 _trace_persona_id 上；conv.persona_id 只是对话行
+            # 快照，override 被单独改过时两者会长期不一致且比较恒相等，
+            # 所以以本轮真正生效的人格为基准。
+            runtime_persona_id = event.get_extra("_trace_persona_id")
+            if runtime_persona_id is None:
+                runtime_persona_id = snapshot_persona_id
+            if runtime_persona_id != target_persona_id:
                 await self._align_request_snapshot(
                     event, req, target_persona_id, persona
                 )
@@ -223,10 +254,11 @@ class PersonaPlus(Star):
     ) -> None:
         """对齐构建期读到的旧人格快照与本次请求。
 
-        本体在构建请求时读取 conversation 快照，并以固定格式
-        （"\\n# Persona Instructions\\n\\n{prompt}\\n"）注入该人格的
+        本体在构建请求时按当轮生效的会话 override 解析人格，并以
+        "<persona_instructions>...</persona_instructions>"（4.30）或
+        "\\n# Persona Instructions\\n\\n{prompt}\\n"（4.29）的格式注入
         system_prompt 段与开场对话；若构建与钩子之间发生了人格切换，
-        快照仍是旧人格。此时：
+        注入的仍是旧人格。此时：
         1. 定点替换 system_prompt 中的人格段，保留本体注入的
            安全模式、工具约定等其他段落；
         2. 快照对话仍是当前对话时，把它的 persona_id 修正为存储值
@@ -236,7 +268,11 @@ class PersonaPlus(Star):
           （切换指令已新建对话），只对齐本次请求。
         """
         conv = getattr(req, "conversation", None)
-        old_persona_id = getattr(conv, "persona_id", None) if conv else None
+        # 本轮 prompt 里实际注入的是构建阶段解析出的 _trace_persona_id
+        # 对应的人格；conv.persona_id 只是对话行快照，可能与之不一致。
+        old_persona_id = event.get_extra("_trace_persona_id") or (
+            getattr(conv, "persona_id", None) if conv else None
+        )
 
         old_persona = None
         if old_persona_id:
@@ -281,27 +317,58 @@ class PersonaPlus(Star):
     def _rebase_system_prompt(req: ProviderRequest, old_persona, new_persona) -> None:
         """把 system_prompt 中本体注入的旧人格段替换为新人格段。
 
-        本体以固定格式追加人格段（"\\n# Persona Instructions\\n\\n{prompt}\\n"），
-        定点替换可保留安全模式、工具约定等其他段落。任何分支都保证
-        新人格 prompt 在场（人格必定切换生效）：
-        - 旧人格段能精确定位 → 定点替换；
-        - 段在但无法定位（旧人格刚被删/刚被改）→ 全量替换兜底；
-        - 本体未注入人格段（[%None]/人格不存在/空 prompt）→ 追加。
+        4.30 本体以 "\\n<persona_instructions>\\n{prompt}\\n
+        </persona_instructions>\\n" 注入人格段，4.29 及更早用
+        "\\n# Persona Instructions\\n\\n{prompt}\\n"。先按 4.30 格式定位、
+        只替换标签内的内容，再回退到 4.29 格式；两者都不在时才追加。
+        任何分支都只改人格段本身，保留安全模式、工具约定等其他段落。
         """
-        marker = "\n# Persona Instructions\n\n"
-        new_section = marker + (new_persona.system_prompt or "") + "\n"
         sp = req.system_prompt or ""
+        new_prompt = new_persona.system_prompt or ""
+        old_prompt = (
+            getattr(old_persona, "system_prompt", None) if old_persona else None
+        )
 
-        old_section = None
-        if old_persona is not None and old_persona.system_prompt:
-            old_section = marker + old_persona.system_prompt + "\n"
+        # 4.30：<persona_instructions> 段
+        tag_open = "<persona_instructions>"
+        tag_close = "</persona_instructions>"
+        new_section_430 = f"\n{tag_open}\n{new_prompt}\n{tag_close}\n"
 
-        if old_section and old_section in sp:
-            sp = sp.replace(old_section, new_section, 1)
-        elif marker in sp:
-            sp = new_section
-        else:
-            sp = sp + new_section
+        replaced = False
+        if old_prompt:
+            old_section_430 = f"\n{tag_open}\n{old_prompt}\n{tag_close}\n"
+            if old_section_430 in sp:
+                sp = sp.replace(old_section_430, new_section_430, 1)
+                replaced = True
+        if not replaced:
+            start = sp.find(tag_open)
+            end = sp.find(tag_close, start + len(tag_open)) if start != -1 else -1
+            if start != -1 and end != -1:
+                # 旧人格文本未知（刚被删/改）：只替换标签内的内容，
+                # 标签外的 safety/工具约定等段落原样保留
+                sp = sp[:start] + f"{tag_open}\n{new_prompt}\n" + sp[end:]
+                replaced = True
+
+        # 4.29 回退：# Persona Instructions 段
+        marker = "\n# Persona Instructions\n\n"
+        if not replaced:
+            new_section = marker + new_prompt + "\n"
+            if old_prompt:
+                old_section = marker + old_prompt + "\n"
+                if old_section in sp:
+                    sp = sp.replace(old_section, new_section, 1)
+                    replaced = True
+            if not replaced and marker in sp:
+                # 旧人格文本未知：替换从 marker 到下一个一级标题之前的内容
+                pos = sp.find(marker)
+                body_start = pos + len(marker)
+                next_heading = sp.find("\n\n# ", body_start)
+                section_end = next_heading if next_heading != -1 else len(sp)
+                sp = sp[:pos] + new_section + sp[section_end:]
+                replaced = True
+
+        if not replaced:
+            sp = sp + new_section_430
         req.system_prompt = sp
 
     @staticmethod
@@ -339,8 +406,13 @@ class PersonaPlus(Star):
         old_entries = cls._begin_dialog_entries(old_persona) if old_persona else []
         n = len(old_entries)
         if n == 0:
-            # 旧快照没有开场对话（人格为空或无效），直接补上新人格的
-            if new_entries:
+            # 旧快照没有开场对话（人格为空或无效）。本体构建时通常已
+            # 插入过新人格的 begin_dialogs，头部已经是这份内容时不能
+            # 再插一遍（否则开场问答会重复两份），只有确实缺失才补。
+            already_present = len(contexts) >= len(new_entries) and cls._head_matches(
+                contexts[: len(new_entries)], new_entries
+            )
+            if new_entries and not already_present:
                 contexts[:0] = new_entries
             return contexts
         if len(contexts) >= n and cls._head_matches(contexts[:n], old_entries):
@@ -642,16 +714,40 @@ class PersonaPlus(Star):
         *,
         stop_event: bool = True,
     ) -> None:
+        """占用该 umo 的切换槽位并启动流程，任何异常都不会泄漏占位。
+
+        _active_switches 原先"先占位、等稍后创建的任务在 finally 释放"，
+        占位与创建任务之间任何一步抛异常都会让该 umo 永久留在集合里，
+        之后该会话的 pp 与引导全部静默失效。这里用 try/finally 覆盖
+        这段窗口：只有确认占位已交给后台任务（handed_off=True）时，
+        才由任务的 finally 释放。
+        """
         umo = event.unified_msg_origin
         if umo in self._active_switches:
             return
         self._active_switches.add(umo)
+        handed_off = False
+        try:
+            handed_off = await self._launch_interactive_switch(
+                event, umo, intro, stop_event=stop_event
+            )
+        finally:
+            if not handed_off:
+                self._active_switches.discard(umo)
 
+    async def _launch_interactive_switch(
+        self,
+        event: AstrMessageEvent,
+        umo: str,
+        intro: str,
+        *,
+        stop_event: bool,
+    ) -> bool:
+        """发送人格列表并登记 session_waiter；返回 True 表示占位已交给后台任务。"""
         personas = await self.persona_mgr.get_all_personas()
         if not personas:
             await event.send(event.plain_result("当前没有人格，请先在控制台或通过指令创建。"))
-            self._active_switches.discard(umo)
-            return
+            return False
 
         personas = self._sort_personas(personas)
         ordered_personas = compute_display_order(personas, self.settings.persona_groups or None)
@@ -663,8 +759,8 @@ class PersonaPlus(Star):
         ]
 
         try:
-            image_path = render_persona_switch_list(
-                personas, self._get_image_output_dir(), groups=self.settings.persona_groups or None
+            image_path = await self._render_persona_switch_image(
+                personas, self.settings.persona_groups or None
             )
             result = event.make_result()
             result.chain = [
@@ -748,6 +844,47 @@ class PersonaPlus(Star):
         # 引导路径（on_waiting_llm_request）与指令路径都会传入 True。
         if stop_event:
             event.stop_event()
+        # 占位由 run_switch_wait 的 finally 释放
+        return True
+
+    async def _render_persona_switch_image(self, personas: list, groups) -> str:
+        """渲染人格列表图片（线程池 + 短期缓存 + 运行期清理）。
+
+        PIL 整图渲染是纯 CPU 工作（实测 0.4-0.5s/张），直接在事件循环
+        里跑会让同循环上的 TTS/记忆/分段全部排队。这里放到 to_thread，
+        并按"人格顺序 + 分组配置"复用最近一次产物；渲染后顺手清理旧图，
+        避免产物目录在运行期只增不减。
+        """
+        key = (
+            tuple(getattr(p, "persona_id", "") for p in personas),
+            json.dumps(groups or {}, ensure_ascii=False, sort_keys=True),
+        )
+        async with self._render_lock:
+            now = time.time()
+            cached = self._render_cache.get(key)
+            if (
+                cached
+                and now - cached[1] < self._render_cache_ttl
+                and os.path.exists(cached[0])
+            ):
+                return cached[0]
+            image_path = await asyncio.to_thread(
+                render_persona_switch_list,
+                personas,
+                self._get_image_output_dir(),
+                groups=groups,
+            )
+            self._render_cache[key] = (image_path, time.time())
+            self._cleanup_old_images()
+            self._prune_render_cache()
+            return image_path
+
+    def _prune_render_cache(self) -> None:
+        """丢弃过期或文件已被清理的缓存项。"""
+        now = time.time()
+        for key, (path, ts) in list(self._render_cache.items()):
+            if now - ts >= self._render_cache_ttl or not os.path.exists(path):
+                self._render_cache.pop(key, None)
 
     # ==================== 事件监听器：快捷切换（高优先级） ====================
     @filter.event_message_type(filter.EventMessageType.ALL, priority=999)
@@ -877,6 +1014,7 @@ class PersonaPlus(Star):
             context=self.context,
             persona_mgr=self.persona_mgr,
             user_store=self.user_store,
+            exclude_event=event,
         )
         # 人格选择已被清空：同步清除引导标记，让所有会话重新进入
         # "未选择人格" 状态，下次触发时重新引导。
