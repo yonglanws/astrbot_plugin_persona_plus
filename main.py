@@ -967,7 +967,21 @@ class PersonaPlus(Star):
         event.stop_event()
 
     # ==================== 指令：人格切换（高优先级） ====================
-    @filter.command("人格切换", alias={"切换人格", "人格", "切换"}, priority=999)
+    # 带斜杠的写法也要登记：生产的 wake_prefix 是空列表，框架不会剥掉前缀，
+    # "/人格切换" 会原样参与指令匹配，不加别名就匹配不到。
+    @filter.command(
+        "人格切换",
+        alias={
+            "切换人格",
+            "人格",
+            "切换",
+            "/人格切换",
+            "/切换人格",
+            "/人格",
+            "/切换",
+        },
+        priority=999,
+    )
     async def cmd_persona_switch_cn(self, event: AstrMessageEvent):
         """交互式人格切换 / 直接切换：人格切换 人格名"""
         has_perm, err_msg = self.check_permission(event, "switch")
@@ -1006,7 +1020,7 @@ class PersonaPlus(Star):
         await self._start_interactive_switch(event)
 
     # ==================== 指令：重置人格（管理员）（高优先级） ====================
-    @filter.command("重置人格", alias={"reset"}, priority=999)
+    @filter.command("重置人格", alias={"reset", "/重置人格", "/reset"}, priority=999)
     @filter.permission_type(filter.PermissionType.ADMIN)
     async def cmd_reset_personas(self, event: AstrMessageEvent):
         """将所有用户的人格重置为默认"""
