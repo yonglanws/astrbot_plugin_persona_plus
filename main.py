@@ -984,6 +984,17 @@ class PersonaPlus(Star):
     )
     async def cmd_persona_switch_cn(self, event: AstrMessageEvent):
         """交互式人格切换 / 直接切换：人格切换 人格名"""
+        try:
+            admin_flag = bool(event.is_admin())
+        except Exception:  # noqa: BLE001
+            admin_flag = False
+        logger.info(
+            "Persona+ [切人格指令] 命中: text=%r sender=%s umo=%s admin=%s",
+            event.get_message_str(),
+            event.get_sender_id(),
+            event.unified_msg_origin,
+            admin_flag,
+        )
         has_perm, err_msg = self.check_permission(event, "switch")
         if not has_perm:
             yield event.plain_result(err_msg)
