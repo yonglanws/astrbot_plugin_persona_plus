@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import base64
+import html as html_lib
 import os
 import uuid
 from pathlib import Path
@@ -444,3 +446,269 @@ def render_persona_switch_list(
     img.convert("RGB").save(out_path, "PNG")
     logger.info("Persona+ 已渲染人格切换列表图片: %s", out_path)
     return out_path
+
+
+_HTML_THEME_COLORS: dict[str, tuple[str, str]] = {
+    "25点，Nightcord见。": ("#4F46E5", "#EEF2FF"),
+    "Wonderlands×Showtime": ("#D97706", "#FEF3C7"),
+    "Vivid BAD SQUAD": ("#DC2626", "#FEE2E2"),
+    "MORE MORE JUMP!": ("#059669", "#D1FAE5"),
+    "Leo/need": ("#2563EB", "#DBEAFE"),
+    "家长们": ("#52525B", "#F4F4F5"),
+    "25时的家长们": ("#52525B", "#F4F4F5"),
+    "MyGO!!!!!": ("#0284C7", "#E0F2FE"),
+    "Ave Mujica": ("#C026D3", "#FAE8FF"),
+    "millsage": ("#7C3AED", "#EDE9FE"),
+    "梦限大MewType": ("#0D9488", "#CCFBF1"),
+    "一家Dumb Rock!": ("#B45309", "#FFEDD5"),
+}
+_DEFAULT_HTML_THEME = ("#4F46E5", "#EEF2FF")
+_data_uri_cache: dict[str, str | None] = {}
+
+
+def _file_to_data_uri(path: Path) -> str | None:
+    key = str(path)
+    if key not in _data_uri_cache:
+        uri = None
+        if path.exists():
+            try:
+                b64 = base64.b64encode(path.read_bytes()).decode("ascii")
+                uri = f"data:image/png;base64,{b64}"
+            except OSError:
+                uri = None
+        _data_uri_cache[key] = uri
+    return _data_uri_cache[key]
+
+
+def render_persona_switch_html(
+    personas: list,
+    groups: dict[str, list[str]] | None = None,
+) -> str:
+    """生成用于 AstrBot t2i（html_render）的高可读性人格切换 HTML 页面。
+
+    与 build_sections / compute_display_order 保持完全一致的列序与编号。
+    无头像的角色不渲染头像框或占位文字。
+    """
+    columns = build_sections(personas, groups)
+    font_uri = FONT_PATH.resolve().as_uri() if FONT_PATH.exists() else ""
+
+    idx_counter = 1
+    total_groups = 0
+    columns_html: list[str] = []
+
+    for col in columns:
+        sec_blocks: list[str] = []
+        for gname, sec_personas in col:
+            total_groups += 1
+            display_group = gname or "全部人格"
+            accent, soft_bg = _HTML_THEME_COLORS.get(gname, _DEFAULT_HTML_THEME)
+
+            logo_file = GROUP_LOGOS.get(gname)
+            logo_uri = _file_to_data_uri(LOGO_DIR / logo_file) if logo_file else None
+            if logo_uri:
+                header_inner = (
+                    f'<img class="group-logo" src="{logo_uri}" '
+                    f'alt="{html_lib.escape(display_group)}">'
+                )
+            else:
+                header_inner = (
+                    f'<span class="group-title-text">{html_lib.escape(display_group)}</span>'
+                )
+
+            rows_html: list[str] = []
+            for persona in sec_personas:
+                pid = getattr(persona, "persona_id", "")
+                cur_idx = idx_counter
+                idx_counter += 1
+                icon_uri = _file_to_data_uri(ICON_DIR / f"{pid}.png")
+                if icon_uri:
+                    avatar_html = (
+                        f'<div class="avatar-wrap">'
+                        f'<img class="avatar-img" src="{icon_uri}" alt="{html_lib.escape(pid)}">'
+                        f'</div>'
+                    )
+                else:
+                    avatar_html = ""
+
+                rows_html.append(
+                    f'<div class="persona-item">'
+                    f'<span class="idx-pill" style="color: {accent}; background: {soft_bg};">{cur_idx}</span>'
+                    f'{avatar_html}'
+                    f'<span class="persona-name">{html_lib.escape(pid)}</span>'
+                    f'</div>'
+                )
+
+            sec_blocks.append(
+                f'<section class="group-card">'
+                f'<header class="group-header" style="border-left-color: {accent};">'
+                f'<div class="group-brand">{header_inner}</div>'
+                f'<span class="group-count">{len(sec_personas)}</span>'
+                f'</header>'
+                f'<div class="persona-grid">{"".join(rows_html)}</div>'
+                f'</section>'
+            )
+        columns_html.append(f'<div class="col-stack">{"".join(sec_blocks)}</div>')
+
+    total_personas = idx_counter - 1
+    font_face = (
+        f'@font-face {{ font-family: "MiSansCustom"; src: url("{font_uri}") format("truetype"); font-weight: 400 700; }}'
+        if font_uri
+        else ""
+    )
+
+    return f"""<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<style>
+  {font_face}
+  * {{ box-sizing: border-box; margin: 0; padding: 0; }}
+  body {{
+    font-family: "MiSansCustom", "PingFang SC", "Noto Sans CJK SC", "Microsoft YaHei", sans-serif;
+    background: #F4F5F7;
+    color: #111827;
+    width: 1320px;
+    margin: 0 auto;
+    padding: 26px 28px 22px;
+    -webkit-font-smoothing: antialiased;
+  }}
+  .topbar {{
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 18px;
+    padding: 0 2px;
+  }}
+  .topbar-left {{ display: flex; align-items: baseline; gap: 12px; }}
+  .page-title {{ font-size: 30px; font-weight: 700; letter-spacing: -0.02em; color: #111827; }}
+  .page-sub {{ font-size: 14px; color: #6B7280; font-weight: 500; }}
+  .topbar-right {{
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 13px;
+    color: #4B5563;
+    background: #FFFFFF;
+    border: 1px solid #E5E7EB;
+    padding: 7px 14px;
+    border-radius: 10px;
+  }}
+  .kbd {{
+    display: inline-block;
+    padding: 1px 6px;
+    border-radius: 5px;
+    background: #F3F4F6;
+    border: 1px solid #D1D5DB;
+    font-size: 12px;
+    font-weight: 700;
+    color: #111827;
+  }}
+  .board {{
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 18px;
+    align-items: start;
+  }}
+  .col-stack {{ display: flex; flex-direction: column; gap: 18px; }}
+  .group-card {{
+    background: #FFFFFF;
+    border: 1px solid #E5E7EB;
+    border-radius: 16px;
+    padding: 14px 14px 16px;
+    box-shadow: 0 1px 3px rgba(17, 24, 39, 0.04);
+  }}
+  .group-header {{
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 2px 2px 10px 10px;
+    margin-bottom: 10px;
+    border-bottom: 1px solid #F3F4F6;
+    border-left: 4px solid #4F46E5;
+    min-height: 44px;
+  }}
+  .group-brand {{ display: flex; align-items: center; max-width: 310px; }}
+  .group-logo {{ max-height: 38px; max-width: 240px; width: auto; height: auto; object-fit: contain; display: block; }}
+  .group-title-text {{ font-size: 17px; font-weight: 700; color: #111827; }}
+  .group-count {{
+    font-size: 12px;
+    font-weight: 600;
+    color: #6B7280;
+    background: #F3F4F6;
+    padding: 2px 8px;
+    border-radius: 999px;
+  }}
+  .persona-grid {{ display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }}
+  .persona-item {{
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 10px;
+    border-radius: 10px;
+    background: #F9FAFB;
+    border: 1px solid #F1F3F5;
+    min-height: 48px;
+  }}
+  .idx-pill {{
+    flex-shrink: 0;
+    min-width: 26px;
+    height: 24px;
+    padding: 0 5px;
+    border-radius: 7px;
+    font-size: 12px;
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+  }}
+  .avatar-wrap {{
+    flex-shrink: 0;
+    width: 36px;
+    height: 36px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }}
+  .avatar-img {{ max-width: 36px; max-height: 36px; width: auto; height: auto; object-fit: contain; display: block; }}
+  .persona-name {{
+    font-size: 15px;
+    font-weight: 600;
+    color: #111827;
+    line-height: 1.25;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }}
+  .footer {{
+    margin-top: 18px;
+    padding: 0 2px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    font-size: 12px;
+    color: #6B7280;
+  }}
+</style>
+</head>
+<body>
+  <header class="topbar">
+    <div class="topbar-left">
+      <h1 class="page-title">人格切换</h1>
+      <span class="page-sub">共 {total_personas} 位角色 · {total_groups} 个团体</span>
+    </div>
+    <div class="topbar-right">
+      <span>回复 <span class="kbd">序号</span> 切换</span>
+      <span>·</span>
+      <span>快捷 <span class="kbd">pp 角色名</span></span>
+      <span>·</span>
+      <span>回复 <span class="kbd">取消</span> 退出</span>
+    </div>
+  </header>
+  <main class="board">{"".join(columns_html)}</main>
+  <footer class="footer">
+    <span>Persona Plus</span>
+    <span>Designed by 慵懒午睡 · Generated by mzkbot</span>
+  </footer>
+</body>
+</html>"""

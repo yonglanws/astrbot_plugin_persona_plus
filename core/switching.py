@@ -12,9 +12,41 @@ try:  # 4.30 的会话 override；更早的宿主没有这个模块
 except ImportError:  # pragma: no cover - 仅老版本宿主会走到
     update_overrides = None
 
-from .user_persona_store import GroupPersonaStore
+from .user_persona_store import GroupPersonaStore, PendingHistoryResetStore
 
 DEFAULT_PERSONA_ID = "晓山瑞希"
+
+
+def mark_session_cleanup_extras(event: AstrMessageEvent | None) -> None:
+    """标记当前事件需要清理 LTM 与内置群聊上下文，不直接跨插件导入。"""
+    if event is None:
+        return
+    setter = getattr(event, "set_extra", None)
+    if callable(setter):
+        setter("_clean_ltm_session", True)
+        setter("_clean_group_context_session", True)
+
+
+async def clear_session_conversation_history(
+    context: Context,
+    umo: str,
+    persona_id: str,
+) -> bool:
+    """只针对单个 UMO 清空当前对话历史，避免全库读取引发内存暴涨。"""
+    try:
+        conv_mgr = context.conversation_manager
+        cid = await conv_mgr.get_curr_conversation_id(umo)
+        if cid:
+            await conv_mgr.update_conversation(
+                unified_msg_origin=umo,
+                conversation_id=cid,
+                persona_id=persona_id,
+                history=[],
+            )
+        return True
+    except Exception:  # noqa: BLE001
+        logger.warning("Persona+ 清空会话 %s 对话历史失败", umo, exc_info=True)
+        return False
 
 
 async def switch_persona(
@@ -25,6 +57,7 @@ async def switch_persona(
     event: AstrMessageEvent,
     persona_id: str,
     announce: str | None = None,
+    pending_reset_store: PendingHistoryResetStore | None = None,
 ) -> MessageEventResult | None:
     """切换人格：写入持久化存储，并清空当前对话的历史与人格绑定。
 
@@ -74,6 +107,10 @@ async def switch_persona(
                 "Persona+ %s 新建对话后写入人格 override 失败", umo, exc_info=True
             )
         logger.info("Persona+ %s 已切换至人格 %s（新建对话）", umo, persona_id)
+
+    if pending_reset_store is not None:
+        pending_reset_store.discard(umo)
+    mark_session_cleanup_extras(event)
 
     if announce:
         return event.plain_result(announce)
@@ -131,6 +168,7 @@ async def reset_all_personas(
     persona_mgr,
     user_store: GroupPersonaStore,
     exclude_event: AstrMessageEvent | None = None,
+    pending_reset_store: PendingHistoryResetStore | None = None,
 ) -> int:
     """把本插件管理过的人格重置为"晓山瑞希"，并清空持久化存储。
 
@@ -139,6 +177,10 @@ async def reset_all_personas(
     include_history=True，会把全库对话历史一次读进内存（生产约 1.2GB），
     还会把 dashboard/webchat 等与人格切换无关的会话一起改掉。
 
+    历史清空策略：
+    - 发起重置的当前会话（若原先不在默认人格）立即清空当前对话历史并标记清理 extra；
+    - 其余曾切换过人格的会话登记到 pending_reset_store，在其下一条消息进入前懒清理。
+
     exclude_event：发起重置的事件本身（不终止它，否则它的回复会被吞掉）。
     """
     target_persona_id = DEFAULT_PERSONA_ID
@@ -146,7 +188,11 @@ async def reset_all_personas(
     # 1. 记下本插件管理过的会话，再清空持久化存储。之后每条消息都以
     #    "空存储 + 默认人格" 为目标；个别会话若在中断前没来得及重置，
     #    on_llm_request 的运行时人格对比会在下次请求时补齐。
-    managed_umos = sorted(user_store.get_all())
+    managed_items = user_store.get_all()
+    managed_umos = sorted(managed_items)
+    changed_umos = [
+        umo for umo, pid in managed_items.items() if pid and pid != target_persona_id
+    ]
     count = user_store.reset_all()
 
     # 2. 逐个会话重置人格 override；分批让出事件循环，避免长时间独占。
@@ -165,10 +211,27 @@ async def reset_all_personas(
         if index % 50 == 0:
             await asyncio.sleep(0)
 
+    # 3. 发起会话立即清历史并标记扩展记忆清理；其余变更会话登记待下次进入时懒清理。
+    exclude_umo = getattr(exclude_event, "unified_msg_origin", None)
+    pending_umos: list[str] = []
+    for umo in changed_umos:
+        if exclude_umo and umo == exclude_umo:
+            ok = await clear_session_conversation_history(
+                context, umo, target_persona_id
+            )
+            mark_session_cleanup_extras(exclude_event)
+            if not ok:
+                pending_umos.append(umo)
+        else:
+            pending_umos.append(umo)
+    if pending_reset_store is not None and pending_umos:
+        pending_reset_store.add_many(pending_umos)
+
     logger.info(
-        "Persona+ 已重置 %d 个会话存储 → 晓山瑞希（处理 %d 个会话，失败 %d）",
+        "Persona+ 已重置 %d 个会话存储 → 晓山瑞希（处理 %d 个会话，失败 %d，待懒清历史 %d）",
         count,
         cleared,
         failed,
+        len(pending_umos),
     )
     return count

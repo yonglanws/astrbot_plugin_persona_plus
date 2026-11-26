@@ -302,5 +302,445 @@
             "开",
             "冰"
         ]
+    },
+    {
+        "characterId": 27,
+        "name": "25时_miku",
+        "fullName": "25时初音ミク",
+        "fullNameChinese": "25时初音未来",
+        "aliases": [
+            "25miku",
+            "25初音",
+            "25未来",
+            "25葱",
+            "25时miku",
+            "25时初音",
+            "25时未来",
+            "25时葱",
+            "niigomiku",
+            "niigo初音",
+            "niigo未来",
+            "niigo葱"
+        ]
+    },
+    {
+        "characterId": 28,
+        "name": "25时_rin",
+        "fullName": "25时鏡音リン",
+        "fullNameChinese": "25时镜音铃",
+        "aliases": [
+            "25rin",
+            "25铃",
+            "25橘",
+            "25时rin",
+            "25时铃",
+            "25时橘",
+            "niigorin",
+            "niigo铃",
+            "niigo橘"
+        ]
+    },
+    {
+        "characterId": 29,
+        "name": "25时_len",
+        "fullName": "25时鏡音レン",
+        "fullNameChinese": "25时镜音连",
+        "aliases": [
+            "25len",
+            "25连",
+            "25蕉",
+            "25时len",
+            "25时连",
+            "25时蕉",
+            "niigolen",
+            "niigo连",
+            "niigo蕉"
+        ]
+    },
+    {
+        "characterId": 30,
+        "name": "25时_luka",
+        "fullName": "25时巡音ルカ",
+        "fullNameChinese": "25时巡音流歌",
+        "aliases": [
+            "25luka",
+            "25巡音",
+            "25流歌",
+            "25鱼",
+            "25时luka",
+            "25时巡音",
+            "25时流歌",
+            "25时鱼",
+            "niigoluka",
+            "niigo巡音",
+            "niigo流歌",
+            "niigo鱼"
+        ]
+    },
+    {
+        "characterId": 31,
+        "name": "25时_meiko",
+        "fullName": "25时MEIKO",
+        "fullNameChinese": "25时MEIKO",
+        "aliases": [
+            "25meiko",
+            "25mei",
+            "25大姐",
+            "25梅",
+            "25酒",
+            "25时meiko",
+            "25时mei",
+            "25时大姐",
+            "25时梅",
+            "25时酒",
+            "niigomeiko",
+            "niigomei",
+            "niigo大姐",
+            "niigo梅",
+            "niigo酒"
+        ]
+    },
+    {
+        "characterId": 32,
+        "name": "25时_kaito",
+        "fullName": "25时KAITO",
+        "fullNameChinese": "25时KAITO",
+        "aliases": [
+            "25kaito",
+            "25kai",
+            "25大哥",
+            "25海人",
+            "25开",
+            "25冰",
+            "25时kaito",
+            "25时kai",
+            "25时大哥",
+            "25时海人",
+            "25时开",
+            "25时冰",
+            "niigokaito",
+            "niigokai",
+            "niigo大哥",
+            "niigo海人",
+            "niigo开",
+            "niigo冰"
+        ]
+    },
+    {
+        "characterId": 33,
+        "name": "ln_miku",
+        "fullName": "LN初音ミク",
+        "fullNameChinese": "LN初音未来",
+        "aliases": [
+            "lnmiku",
+            "ln初音",
+            "ln未来",
+            "ln葱"
+        ]
+    },
+    {
+        "characterId": 34,
+        "name": "ln_rin",
+        "fullName": "LN鏡音リン",
+        "fullNameChinese": "LN镜音铃",
+        "aliases": [
+            "lnrin",
+            "ln铃",
+            "ln橘"
+        ]
+    },
+    {
+        "characterId": 35,
+        "name": "ln_len",
+        "fullName": "LN鏡音レン",
+        "fullNameChinese": "LN镜音连",
+        "aliases": [
+            "lnlen",
+            "ln连",
+            "ln蕉"
+        ]
+    },
+    {
+        "characterId": 36,
+        "name": "ln_luka",
+        "fullName": "LN巡音ルカ",
+        "fullNameChinese": "LN巡音流歌",
+        "aliases": [
+            "lnluka",
+            "ln巡音",
+            "ln流歌",
+            "ln鱼"
+        ]
+    },
+    {
+        "characterId": 37,
+        "name": "ln_meiko",
+        "fullName": "LNMEIKO",
+        "fullNameChinese": "LNMEIKO",
+        "aliases": [
+            "lnmeiko",
+            "lnmei",
+            "ln大姐",
+            "ln梅",
+            "ln酒"
+        ]
+    },
+    {
+        "characterId": 38,
+        "name": "ln_kaito",
+        "fullName": "LNKAITO",
+        "fullNameChinese": "LNKAITO",
+        "aliases": [
+            "lnkaito",
+            "lnkai",
+            "ln大哥",
+            "ln海人",
+            "ln开",
+            "ln冰"
+        ]
+    },
+    {
+        "characterId": 39,
+        "name": "mmj_miku",
+        "fullName": "MMJ初音ミク",
+        "fullNameChinese": "MMJ初音未来",
+        "aliases": [
+            "mmjmiku",
+            "mmj初音",
+            "mmj未来",
+            "mmj葱"
+        ]
+    },
+    {
+        "characterId": 40,
+        "name": "mmj_rin",
+        "fullName": "MMJ鏡音リン",
+        "fullNameChinese": "MMJ镜音铃",
+        "aliases": [
+            "mmjrin",
+            "mmj铃",
+            "mmj橘"
+        ]
+    },
+    {
+        "characterId": 41,
+        "name": "mmj_len",
+        "fullName": "MMJ鏡音レン",
+        "fullNameChinese": "MMJ镜音连",
+        "aliases": [
+            "mmjlen",
+            "mmj连",
+            "mmj蕉"
+        ]
+    },
+    {
+        "characterId": 42,
+        "name": "mmj_luka",
+        "fullName": "MMJ巡音ルカ",
+        "fullNameChinese": "MMJ巡音流歌",
+        "aliases": [
+            "mmjluka",
+            "mmj巡音",
+            "mmj流歌",
+            "mmj鱼"
+        ]
+    },
+    {
+        "characterId": 43,
+        "name": "mmj_meiko",
+        "fullName": "MMJMEIKO",
+        "fullNameChinese": "MMJMEIKO",
+        "aliases": [
+            "mmjmeiko",
+            "mmjmei",
+            "mmj大姐",
+            "mmj梅",
+            "mmj酒"
+        ]
+    },
+    {
+        "characterId": 44,
+        "name": "mmj_kaito",
+        "fullName": "MMJKAITO",
+        "fullNameChinese": "MMJKAITO",
+        "aliases": [
+            "mmjkaito",
+            "mmjkai",
+            "mmj大哥",
+            "mmj海人",
+            "mmj开",
+            "mmj冰"
+        ]
+    },
+    {
+        "characterId": 45,
+        "name": "vbs_miku",
+        "fullName": "VBS初音ミク",
+        "fullNameChinese": "VBS初音未来",
+        "aliases": [
+            "vbsmiku",
+            "vbs初音",
+            "vbs未来",
+            "vbs葱"
+        ]
+    },
+    {
+        "characterId": 46,
+        "name": "vbs_rin",
+        "fullName": "VBS鏡音リン",
+        "fullNameChinese": "VBS镜音铃",
+        "aliases": [
+            "vbsrin",
+            "vbs铃",
+            "vbs橘"
+        ]
+    },
+    {
+        "characterId": 47,
+        "name": "vbs_len",
+        "fullName": "VBS鏡音レン",
+        "fullNameChinese": "VBS镜音连",
+        "aliases": [
+            "vbslen",
+            "vbs连",
+            "vbs蕉"
+        ]
+    },
+    {
+        "characterId": 48,
+        "name": "vbs_luka",
+        "fullName": "VBS巡音ルカ",
+        "fullNameChinese": "VBS巡音流歌",
+        "aliases": [
+            "vbsluka",
+            "vbs巡音",
+            "vbs流歌",
+            "vbs鱼"
+        ]
+    },
+    {
+        "characterId": 49,
+        "name": "vbs_meiko",
+        "fullName": "VBSMEIKO",
+        "fullNameChinese": "VBSMEIKO",
+        "aliases": [
+            "vbsmeiko",
+            "vbsmei",
+            "vbs大姐",
+            "vbs梅",
+            "vbs酒"
+        ]
+    },
+    {
+        "characterId": 50,
+        "name": "vbs_kaito",
+        "fullName": "VBSKAITO",
+        "fullNameChinese": "VBSKAITO",
+        "aliases": [
+            "vbskaito",
+            "vbskai",
+            "vbs大哥",
+            "vbs海人",
+            "vbs开",
+            "vbs冰"
+        ]
+    },
+    {
+        "characterId": 51,
+        "name": "ws_miku",
+        "fullName": "WS初音ミク",
+        "fullNameChinese": "WS初音未来",
+        "aliases": [
+            "wsmiku",
+            "ws初音",
+            "ws未来",
+            "ws葱"
+        ]
+    },
+    {
+        "characterId": 52,
+        "name": "ws_rin",
+        "fullName": "WS鏡音リン",
+        "fullNameChinese": "WS镜音铃",
+        "aliases": [
+            "wsrin",
+            "ws铃",
+            "ws橘"
+        ]
+    },
+    {
+        "characterId": 53,
+        "name": "ws_len",
+        "fullName": "WS鏡音レン",
+        "fullNameChinese": "WS镜音连",
+        "aliases": [
+            "wslen",
+            "ws连",
+            "ws蕉"
+        ]
+    },
+    {
+        "characterId": 54,
+        "name": "ws_luka",
+        "fullName": "WS巡音ルカ",
+        "fullNameChinese": "WS巡音流歌",
+        "aliases": [
+            "wsluka",
+            "ws巡音",
+            "ws流歌",
+            "ws鱼"
+        ]
+    },
+    {
+        "characterId": 55,
+        "name": "ws_meiko",
+        "fullName": "WSMEIKO",
+        "fullNameChinese": "WSMEIKO",
+        "aliases": [
+            "wsmeiko",
+            "wsmei",
+            "ws大姐",
+            "ws梅",
+            "ws酒"
+        ]
+    },
+    {
+        "characterId": 56,
+        "name": "ws_kaito",
+        "fullName": "WSKAITO",
+        "fullNameChinese": "WSKAITO",
+        "aliases": [
+            "wskaito",
+            "wskai",
+            "ws大哥",
+            "ws海人",
+            "ws开",
+            "ws冰"
+        ]
+    },
+    {
+        "characterId": 57,
+        "name": "nagi",
+        "fullName": "古瀧凪",
+        "fullNameChinese": "古泷凪",
+        "aliases": [
+            "凪",
+            "凪姐",
+            "nagi",
+            "古泷"
+        ]
+    },
+    {
+        "characterId": 58,
+        "name": "shinei",
+        "fullName": "東雲慎英",
+        "fullNameChinese": "东云慎英",
+        "aliases": [
+            "慎英",
+            "shinei",
+            "绘名爸",
+            "彰人爸",
+            "东云爸"
+        ]
     }
 ]

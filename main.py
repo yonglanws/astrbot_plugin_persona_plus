@@ -18,12 +18,19 @@ from .core.config import PersonaPlusSettings, load_settings
 from .core.image_renderer import (
     EXCLUDE_PERSONA_IDS,
     compute_display_order,
+    render_persona_switch_html,
     render_persona_switch_list,
 )
 from .core.permissions import check_permission
 from .core.session_flows import GroupScopedSessionFilter
-from .core.switching import DEFAULT_PERSONA_ID, reset_all_personas, switch_persona
-from .core.user_persona_store import GroupPersonaStore
+from .core.switching import (
+    DEFAULT_PERSONA_ID,
+    clear_session_conversation_history,
+    mark_session_cleanup_extras,
+    reset_all_personas,
+    switch_persona,
+)
+from .core.user_persona_store import GroupPersonaStore, PendingHistoryResetStore
 
 from astrbot.core.utils.session_waiter import SessionController, session_waiter
 
@@ -38,6 +45,9 @@ class PersonaPlus(Star):
 
         data_dir = StarTools.get_data_dir("astrbot_plugin_persona_plus")
         self.user_store = GroupPersonaStore(data_dir / "group_personas.json")
+        self.pending_reset_store = PendingHistoryResetStore(
+            data_dir / "pending_history_resets.json"
+        )
         self._image_output_dir = str(data_dir / "images")
         self._guided_path = data_dir / "guided_umos.json"
 
@@ -166,6 +176,13 @@ class PersonaPlus(Star):
         发送序号即可完成选择。
         """
         umo = event.unified_msg_origin
+        if self.pending_reset_store.contains(umo):
+            if await clear_session_conversation_history(
+                self.context, umo, DEFAULT_PERSONA_ID
+            ):
+                self.pending_reset_store.discard(umo)
+            mark_session_cleanup_extras(event)
+
         if self.user_store.get(umo) or self._is_guide_pending(umo):
             return
 
@@ -228,6 +245,15 @@ class PersonaPlus(Star):
             # 每次 LLM 请求重置前缀标记：本轮对话（含工具调用的多段结果）
             # 只会加一次前缀
             event.set_extra("_persona_plus_prefixed", False)
+
+            if self.pending_reset_store.contains(umo):
+                if await clear_session_conversation_history(
+                    self.context, umo, target_persona_id
+                ):
+                    self.pending_reset_store.discard(umo)
+                mark_session_cleanup_extras(event)
+                if isinstance(getattr(req, "contexts", None), list):
+                    req.contexts = self._begin_dialog_entries(persona)
 
             conv = getattr(req, "conversation", None)
             snapshot_persona_id = getattr(conv, "persona_id", None) if conv else None
@@ -569,9 +595,13 @@ class PersonaPlus(Star):
             return None, []
         persona_ids = {p.persona_id for p in personas}
 
-        # 人格ID 精确命中
+        # 人格ID 精确命中（先精确，再大小写不敏感）
         if ref in persona_ids:
             return ref, []
+        ref_lower = ref.lower()
+        ci_matches = [pid for pid in persona_ids if pid.lower() == ref_lower]
+        if len(ci_matches) == 1:
+            return ci_matches[0], []
 
         # 文件夹路径（如 "分组/人格ID"）按路径解析
         if "/" in ref:
@@ -584,53 +614,87 @@ class PersonaPlus(Star):
                 return None, []
 
         # 别名精确命中（characters.json）
-        resolved = self._char_store.resolve(ref)
-        if resolved and resolved in persona_ids:
-            return resolved, []
+        exact_targets = [
+            pid for pid in self._char_store.resolve_all(ref) if pid in persona_ids
+        ]
+        if len(exact_targets) == 1:
+            return exact_targets[0], []
+        if len(exact_targets) > 1:
+            return None, sorted(set(exact_targets))
 
-        # 模糊匹配：别名含关键词 或 人格ID含关键词；剔除已不存在的人格
-        ref_lower = ref.lower()
-        candidates = set(self._char_store.search(ref))
-        candidates |= {pid for pid in persona_ids if ref_lower in pid.lower()}
+        # 模糊匹配：别名含关键词 或 人格ID含关键词；单字符 ASCII 不做子串匹配
+        allow_substr = not (len(ref_lower) == 1 and ref_lower.isascii())
+        candidates = set(self._char_store.search(ref, valid_ids=persona_ids))
+        if allow_substr:
+            candidates |= {pid for pid in persona_ids if ref_lower in pid.lower()}
         candidates &= persona_ids
         if len(candidates) == 1:
             return next(iter(candidates)), []
         if not candidates:
-            # 子串无命中时按编辑距离近似匹配（容错错别字、漏字、
-            # 罗马音/日文/中文之间的形近输入）
+            # 子串无命中时按编辑距离近似匹配（容错错别字、漏字）
             candidates = self._close_match_persona_ids(ref_lower, persona_ids)
             if len(candidates) == 1:
                 return next(iter(candidates)), []
         return None, sorted(candidates)
 
     def _close_match_persona_ids(self, ref_lower: str, persona_ids: set[str]) -> set[str]:
-        """在别名键与人格ID上做 difflib 近似匹配，返回命中的人格集合。
+        """在别名键与人格ID上做高精度的编辑距离近似匹配。
 
-        只在子串匹配零命中时调用；阈值为 difflib 默认 0.6，
-        3-4 字名称可容错一个字的出入。匹配不上时返回空集合（静默）。
+        只在子串匹配零命中时调用；长度 < 3 不做近似匹配避免误命中，
+        仅保留与最高相似度相差 0.08 以内的结果。
         """
-        alias_map = self._char_store.alias_targets()
-        keys: dict[str, str] = {}
-        for alias, target in alias_map.items():
-            if target in persona_ids:
-                keys.setdefault(alias, target)
-        for pid in persona_ids:
-            keys.setdefault(pid.lower(), pid)
-        if not keys or len(ref_lower) < 2:
+        if len(ref_lower) < 3:
             return set()
-        close = difflib.get_close_matches(ref_lower, list(keys), n=10, cutoff=0.6)
-        return {keys[k] for k in close}
+        alias_map = self._char_store.alias_targets()
+        keys: dict[str, set[str]] = {}
+        for alias, targets in alias_map.items():
+            valid = {t for t in targets if t in persona_ids}
+            if valid:
+                keys.setdefault(alias, set()).update(valid)
+        for pid in persona_ids:
+            keys.setdefault(pid.lower(), set()).add(pid)
+        if not keys:
+            return set()
+
+        cutoff = 0.72 if len(ref_lower) == 3 else 0.65
+        scored: list[tuple[float, str]] = []
+        for k in keys:
+            ratio = difflib.SequenceMatcher(None, ref_lower, k).ratio()
+            if ratio >= cutoff:
+                scored.append((ratio, k))
+        if not scored:
+            return set()
+        best = max(r for r, _ in scored)
+        matched: set[str] = set()
+        for ratio, k in scored:
+            if ratio >= best - 0.08:
+                matched.update(keys[k])
+        return matched
+
+    def _persona_group_map(self) -> dict[str, str]:
+        """构建 persona_id → 团体分组名 的映射。"""
+        group_map: dict[str, str] = {}
+        for gname, members in (self.settings.persona_groups or {}).items():
+            for pid in members:
+                clean = pid.strip()
+                if clean and clean not in group_map:
+                    group_map[clean] = gname
+        return group_map
 
     async def _format_candidates(
         self, persona_ref: str, candidates: list[str], hint: str
     ) -> str:
-        """生成多候选提示文本；序号为渲染列表中的显示编号，可直接用于切换。"""
+        """生成多候选提示文本：格式为 [序号]名字(团体)。"""
         index_map = await self._display_index_map()
+        group_map = self._persona_group_map()
         ordered = sorted(candidates, key=lambda pid: (index_map.get(pid, 10**9), pid))
-        lines = [f"「{persona_ref}」匹配到多个人格，{hint}："]
+        lines = [f"「{persona_ref}」匹配到多个角色，{hint}："]
         for pid in ordered:
             idx = index_map.get(pid)
-            lines.append(f"  {idx}. {pid}" if idx else f"  - {pid}")
+            idx_str = f"[{idx}]" if idx else "[-]"
+            group = group_map.get(pid)
+            group_str = f"({group})" if group else ""
+            lines.append(f"{idx_str}{pid}{group_str}")
         return "\n".join(lines)
 
     async def _resolve_persona_reference(
@@ -704,6 +768,7 @@ class PersonaPlus(Star):
             event=event,
             persona_id=resolved_persona_id,
             announce=announce,
+            pending_reset_store=self.pending_reset_store,
         )
 
     # ==================== 交互式人格切换 ====================
@@ -759,13 +824,18 @@ class PersonaPlus(Star):
         ]
 
         try:
-            image_path = await self._render_persona_switch_image(
+            image_ref = await self._render_persona_switch_image(
                 personas, self.settings.persona_groups or None
+            )
+            img_comp = (
+                Comp.Image.fromURL(image_ref)
+                if image_ref.startswith(("http://", "https://"))
+                else Comp.Image.fromFileSystem(image_ref)
             )
             result = event.make_result()
             result.chain = [
                 Comp.Plain(intro),
-                Comp.Image.fromFileSystem(image_path),
+                img_comp,
             ]
             await event.send(result)
         except Exception as e:
@@ -848,13 +918,7 @@ class PersonaPlus(Star):
         return True
 
     async def _render_persona_switch_image(self, personas: list, groups) -> str:
-        """渲染人格列表图片（线程池 + 短期缓存 + 运行期清理）。
-
-        PIL 整图渲染是纯 CPU 工作（实测 0.4-0.5s/张），直接在事件循环
-        里跑会让同循环上的 TTS/记忆/分段全部排队。这里放到 to_thread，
-        并按"人格顺序 + 分组配置"复用最近一次产物；渲染后顺手清理旧图，
-        避免产物目录在运行期只增不减。
-        """
+        """优先用 AstrBot t2i（html_render）渲染人格列表图片，失败时回退到 PIL。"""
         key = (
             tuple(getattr(p, "persona_id", "") for p in personas),
             json.dumps(groups or {}, ensure_ascii=False, sort_keys=True),
@@ -862,22 +926,42 @@ class PersonaPlus(Star):
         async with self._render_lock:
             now = time.time()
             cached = self._render_cache.get(key)
-            if (
-                cached
-                and now - cached[1] < self._render_cache_ttl
-                and os.path.exists(cached[0])
-            ):
-                return cached[0]
-            image_path = await asyncio.to_thread(
-                render_persona_switch_list,
-                personas,
-                self._get_image_output_dir(),
-                groups=groups,
-            )
-            self._render_cache[key] = (image_path, time.time())
+            if cached and now - cached[1] < self._render_cache_ttl:
+                cached_ref = cached[0]
+                if cached_ref.startswith(("http://", "https://")) or os.path.exists(cached_ref):
+                    return cached_ref
+
+            image_ref: str | None = None
+            if hasattr(self, "html_render"):
+                try:
+                    html_str = render_persona_switch_html(personas, groups=groups)
+                    image_ref = await self.html_render(
+                        html_str,
+                        {},
+                        return_url=False,
+                        options={
+                            "type": "png",
+                            "full_page": True,
+                            "viewport": {"width": 1320, "height": 900},
+                            "device_scale_factor": 2,
+                        },
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("Persona+ html_render 失败，回退 PIL 渲染: %s", exc)
+                    image_ref = None
+
+            if not image_ref:
+                image_ref = await asyncio.to_thread(
+                    render_persona_switch_list,
+                    personas,
+                    self._get_image_output_dir(),
+                    groups=groups,
+                )
+
+            self._render_cache[key] = (image_ref, time.time())
             self._cleanup_old_images()
             self._prune_render_cache()
-            return image_path
+            return image_ref
 
     def _prune_render_cache(self) -> None:
         """丢弃过期或文件已被清理的缓存项。"""
@@ -1040,6 +1124,7 @@ class PersonaPlus(Star):
             persona_mgr=self.persona_mgr,
             user_store=self.user_store,
             exclude_event=event,
+            pending_reset_store=self.pending_reset_store,
         )
         # 人格选择已被清空：同步清除引导标记，让所有会话重新进入
         # "未选择人格" 状态，下次触发时重新引导。
