@@ -212,3 +212,128 @@ def test_reset_all_personas_clears_origin_and_queues_other_changed_umos_without_
     assert not reloaded_pending.contains(umo_other)
     assert next_ev.get_extra("_clean_ltm_session") is True
     assert next_ev.get_extra("_clean_group_context_session") is True
+
+
+def test_switch_persona_retries_on_conversation_conflict_and_succeeds(
+    tmp_path: Path, monkeypatch
+) -> None:
+    _install_astrbot_stubs()
+    from astrbot_plugin_persona_plus.core.switching import switch_persona
+    from astrbot_plugin_persona_plus.core.user_persona_store import (
+        GroupPersonaStore,
+        PendingHistoryResetStore,
+    )
+
+    class ConversationConflictError(Exception):
+        pass
+
+    monkeypatch.setattr("asyncio.sleep", AsyncMock())
+    umo = "qq_offficial:FriendMessage:conflict-ok"
+    user_store = GroupPersonaStore(tmp_path / "group_personas.json")
+    pending_store = PendingHistoryResetStore(tmp_path / "pending.json")
+    pending_store.add_many([umo])
+
+    attempts = {"count": 0}
+
+    async def flaky_update(**kwargs):
+        attempts["count"] += 1
+        if attempts["count"] <= 2:
+            raise ConversationConflictError("Conversation changed; reload before committing")
+
+    conv_mgr = SimpleNamespace(
+        get_curr_conversation_id=AsyncMock(side_effect=["cid-1", "cid-1", "cid-2"]),
+        update_conversation=AsyncMock(side_effect=flaky_update),
+        new_conversation=AsyncMock(),
+    )
+    context = SimpleNamespace(conversation_manager=conv_mgr)
+    persona_mgr = SimpleNamespace(get_persona=AsyncMock(return_value={"name": "要乐奈"}))
+    ev = _DummyEvent(umo)
+
+    res = asyncio.run(
+        switch_persona(
+            context=context,
+            persona_mgr=persona_mgr,
+            user_store=user_store,
+            event=ev,
+            persona_id="要乐奈",
+            announce="已切换",
+            pending_reset_store=pending_store,
+        )
+    )
+
+    assert res.text == "已切换"
+    assert attempts["count"] == 3
+    assert ev.get_extra("_clean_ltm_session") is True
+    assert ev.get_extra("_clean_group_context_session") is True
+    assert not pending_store.contains(umo)
+
+
+def test_switch_persona_falls_back_to_pending_reset_when_conflicts_exhausted(
+    tmp_path: Path, monkeypatch
+) -> None:
+    _install_astrbot_stubs()
+    import astrbot.core.session_overrides as so_mod
+    from astrbot_plugin_persona_plus.core.switching import (
+        clear_session_conversation_history,
+        switch_persona,
+    )
+    from astrbot_plugin_persona_plus.core.user_persona_store import (
+        GroupPersonaStore,
+        PendingHistoryResetStore,
+    )
+
+    so_mod.calls.clear()
+
+    class ConversationConflictError(Exception):
+        pass
+
+    monkeypatch.setattr("asyncio.sleep", AsyncMock())
+    umo = "qq_offficial:GroupMessage:conflict-exhaust"
+    user_store = GroupPersonaStore(tmp_path / "group_personas.json")
+    pending_store = PendingHistoryResetStore(tmp_path / "pending.json")
+
+    conv_mgr = SimpleNamespace(
+        get_curr_conversation_id=AsyncMock(return_value="cid-busy"),
+        update_conversation=AsyncMock(
+            side_effect=ConversationConflictError("Conversation changed; reload before committing")
+        ),
+        new_conversation=AsyncMock(),
+    )
+    context = SimpleNamespace(
+        conversation_manager=conv_mgr,
+        get_config=lambda umo=None: {"agent": {"runtime": "astrbot", "config": {"persona": {}}}},
+    )
+    persona_mgr = SimpleNamespace(get_persona=AsyncMock(return_value={"name": "东云彰人"}))
+    ev = _DummyEvent(umo)
+
+    res = asyncio.run(
+        switch_persona(
+            context=context,
+            persona_mgr=persona_mgr,
+            user_store=user_store,
+            event=ev,
+            persona_id="东云彰人",
+            announce="已切换",
+            pending_reset_store=pending_store,
+        )
+    )
+
+    assert res.text == "已切换"
+    assert conv_mgr.update_conversation.await_count == 5
+    assert ev.get_extra("_clean_ltm_session") is True
+    assert ev.get_extra("_clean_group_context_session") is True
+    assert pending_store.contains(umo)
+    assert user_store.get(umo) == "东云彰人"
+    assert (umo, {"agent.config.persona.persona_id": "东云彰人"}) in so_mod.calls
+
+    # 验证兜底队列消费时使用的是 user_store 中的目标人格（东云彰人），而非覆盖回默认人格
+    conv_mgr.update_conversation = AsyncMock(return_value=None)
+    target_pid = user_store.get(umo)
+    ok = asyncio.run(clear_session_conversation_history(context, umo, target_pid))
+    assert ok is True
+    conv_mgr.update_conversation.assert_awaited_once_with(
+        unified_msg_origin=umo,
+        conversation_id="cid-busy",
+        persona_id="东云彰人",
+        history=[],
+    )

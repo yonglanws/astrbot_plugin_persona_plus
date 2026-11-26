@@ -194,7 +194,10 @@ def build_sections(
 
     返回 [ [ (分组名, [persona]), ... ]（第一列）, ... ]（第二、三列）。
     分组按配置顺序依次放入当前最矮的列（按估算高度均衡三列）。
+    编号按列从左到右、列内自上而下。
+    虚拟歌姬、家长组与个别角色先并入所属组合，与图片渲染一致。
     """
+    groups = merge_virtual_singers_into_groups(personas, groups)
     personas = _visible_personas(personas)
     section_labels: list[tuple[str, list]] = []
     assigned = set()
@@ -235,6 +238,8 @@ def compute_display_order(
     """返回按图片渲染顺序（即显示编号顺序）排列的 persona 列表。
 
     图片编号规则：按列从左到右，列内各分组自上而下。
+    与 render_persona_switch_html 一样先把虚拟歌姬并入所属组合，
+    保证图片序号和输入序号指向同一个人格。
     """
     ordered: list = []
     for col in build_sections(personas, groups):
@@ -465,15 +470,92 @@ _HTML_THEME_COLORS: dict[str, tuple[str, str]] = {
 _DEFAULT_HTML_THEME = ("#4F46E5", "#EEF2FF")
 _data_uri_cache: dict[str, str | None] = {}
 
+# 虚拟歌姬的 persona_id 前缀 → 所属组合分组名。渲染时前缀剥掉，只显示角色名，
+# 歌姬并入该组合的分组卡片（不再单独成组）。
+_VIRTUAL_SINGER_GROUPS: dict[str, tuple[str, ...]] = {
+    "25时": ("25点，Nightcord见。",),
+    "LN": ("Leo/need",),
+    "MMJ": ("MORE MORE JUMP!",),
+    "VBS": ("Vivid BAD SQUAD",),
+    "WS": ("Wonderlands×Showtime",),
+}
+_VIRTUAL_SINGER_NAMES = ("初音未来", "镜音铃", "镜音连", "巡音流歌", "MEIKO", "KAITO")
 
-def _file_to_data_uri(path: Path) -> str | None:
-    key = str(path)
+# 整组并入另一个组合：被并入的分组不再单独成卡，成员追加到目标组合之后。
+_ABSORB_GROUPS: dict[str, str] = {
+    "25时的家长们": "25点，Nightcord见。",
+    "家长们": "25点，Nightcord见。",
+}
+# 单个未分组人格 → 所属组合。
+_EXTRA_PERSONA_GROUPS: dict[str, str] = {
+    "东云慎英": "25点，Nightcord见。",
+    "古泷凪": "Vivid BAD SQUAD",
+}
+
+
+def virtual_singer_display_name(persona_id: str) -> str:
+    """去掉虚拟歌姬 persona_id 的团名前缀；非虚拟歌姬原样返回。"""
+    for prefix in _VIRTUAL_SINGER_GROUPS:
+        if (
+            persona_id.startswith(prefix)
+            and persona_id[len(prefix) :] in _VIRTUAL_SINGER_NAMES
+        ):
+            return persona_id[len(prefix) :]
+    return persona_id
+
+
+def merge_virtual_singers_into_groups(
+    personas: list,
+    groups: dict[str, list[str]] | None,
+) -> dict[str, list[str]] | None:
+    """把虚拟歌姬、家长组和个别角色并入所属组合，供渲染使用。
+
+    配置里没列出的会落到「未分组」。这里按前缀和固定映射归组，
+    追加到对应组合已有成员之后；被并入的分组不再单独成卡。
+    不改动传入的配置字典。
+    """
+    if not groups:
+        return groups
+    merged: dict[str, list[str]] = {}
+    absorbed: dict[str, list[str]] = {}
+    for group_name, ids in groups.items():
+        target = _ABSORB_GROUPS.get(group_name)
+        if target and target in groups:
+            absorbed.setdefault(target, []).extend(ids)
+        else:
+            merged[group_name] = list(ids)
+
+    assigned = {pid for ids in groups.values() for pid in ids}
+    extras: dict[str, list[str]] = {}
+    for persona in personas:
+        pid = getattr(persona, "persona_id", "")
+        if pid in assigned:
+            continue
+        target = _EXTRA_PERSONA_GROUPS.get(pid)
+        if target and target in merged:
+            extras.setdefault(target, []).append(pid)
+            continue
+        for prefix, group_names in _VIRTUAL_SINGER_GROUPS.items():
+            if pid.startswith(prefix) and pid[len(prefix) :] in _VIRTUAL_SINGER_NAMES:
+                for group_name in group_names:
+                    if group_name in merged:
+                        extras.setdefault(group_name, []).append(pid)
+                        break
+                break
+    return {
+        group_name: ids + absorbed.get(group_name, []) + extras.get(group_name, [])
+        for group_name, ids in merged.items()
+    }
+
+
+def _file_to_data_uri(path: Path, mime: str = "image/png") -> str | None:
+    key = f"{mime}:{path}"
     if key not in _data_uri_cache:
         uri = None
         if path.exists():
             try:
                 b64 = base64.b64encode(path.read_bytes()).decode("ascii")
-                uri = f"data:image/png;base64,{b64}"
+                uri = f"data:{mime};base64,{b64}"
             except OSError:
                 uri = None
         _data_uri_cache[key] = uri
@@ -488,9 +570,11 @@ def render_persona_switch_html(
 
     与 build_sections / compute_display_order 保持完全一致的列序与编号。
     无头像的角色不渲染头像框或占位文字。
+    虚拟歌姬并入所属组合，名字去掉团名前缀。
     """
     columns = build_sections(personas, groups)
-    font_uri = FONT_PATH.resolve().as_uri() if FONT_PATH.exists() else ""
+    # t2i 在远端渲染，file:// 字体它读不到，所以内嵌成 data URI
+    font_uri = _file_to_data_uri(FONT_PATH, mime="font/ttf") or ""
 
     idx_counter = 1
     total_groups = 0
@@ -518,13 +602,14 @@ def render_persona_switch_html(
             rows_html: list[str] = []
             for persona in sec_personas:
                 pid = getattr(persona, "persona_id", "")
+                display_name = virtual_singer_display_name(pid)
                 cur_idx = idx_counter
                 idx_counter += 1
                 icon_uri = _file_to_data_uri(ICON_DIR / f"{pid}.png")
                 if icon_uri:
                     avatar_html = (
                         f'<div class="avatar-wrap">'
-                        f'<img class="avatar-img" src="{icon_uri}" alt="{html_lib.escape(pid)}">'
+                        f'<img class="avatar-img" src="{icon_uri}" alt="{html_lib.escape(display_name)}">'
                         f'</div>'
                     )
                 else:
@@ -534,7 +619,7 @@ def render_persona_switch_html(
                     f'<div class="persona-item">'
                     f'<span class="idx-pill" style="color: {accent}; background: {soft_bg};">{cur_idx}</span>'
                     f'{avatar_html}'
-                    f'<span class="persona-name">{html_lib.escape(pid)}</span>'
+                    f'<span class="persona-name">{html_lib.escape(display_name)}</span>'
                     f'</div>'
                 )
 
@@ -563,99 +648,99 @@ def render_persona_switch_html(
 <style>
   {font_face}
   * {{ box-sizing: border-box; margin: 0; padding: 0; }}
-  body {{
+    body {{
     font-family: "MiSansCustom", "PingFang SC", "Noto Sans CJK SC", "Microsoft YaHei", sans-serif;
     background: #F4F5F7;
     color: #111827;
-    width: 1320px;
+    width: 2640px;
     margin: 0 auto;
-    padding: 26px 28px 22px;
+    padding: 52px 56px 44px;
     -webkit-font-smoothing: antialiased;
   }}
   .topbar {{
     display: flex;
     align-items: center;
     justify-content: space-between;
-    margin-bottom: 18px;
-    padding: 0 2px;
+    margin-bottom: 36px;
+    padding: 0 4px;
   }}
-  .topbar-left {{ display: flex; align-items: baseline; gap: 12px; }}
-  .page-title {{ font-size: 30px; font-weight: 700; letter-spacing: -0.02em; color: #111827; }}
-  .page-sub {{ font-size: 14px; color: #6B7280; font-weight: 500; }}
+  .topbar-left {{ display: flex; align-items: baseline; gap: 24px; }}
+  .page-title {{ font-size: 60px; font-weight: 700; letter-spacing: -0.02em; color: #111827; }}
+  .page-sub {{ font-size: 28px; color: #6B7280; font-weight: 500; }}
   .topbar-right {{
     display: flex;
     align-items: center;
-    gap: 8px;
-    font-size: 13px;
+    gap: 16px;
+    font-size: 26px;
     color: #4B5563;
     background: #FFFFFF;
-    border: 1px solid #E5E7EB;
-    padding: 7px 14px;
-    border-radius: 10px;
+    border: 2px solid #E5E7EB;
+    padding: 14px 28px;
+    border-radius: 20px;
   }}
   .kbd {{
     display: inline-block;
-    padding: 1px 6px;
-    border-radius: 5px;
+    padding: 2px 12px;
+    border-radius: 10px;
     background: #F3F4F6;
-    border: 1px solid #D1D5DB;
-    font-size: 12px;
+    border: 2px solid #D1D5DB;
+    font-size: 24px;
     font-weight: 700;
     color: #111827;
   }}
   .board {{
     display: grid;
     grid-template-columns: repeat(3, minmax(0, 1fr));
-    gap: 18px;
+    gap: 36px;
     align-items: start;
   }}
-  .col-stack {{ display: flex; flex-direction: column; gap: 18px; }}
+  .col-stack {{ display: flex; flex-direction: column; gap: 36px; }}
   .group-card {{
     background: #FFFFFF;
-    border: 1px solid #E5E7EB;
-    border-radius: 16px;
-    padding: 14px 14px 16px;
-    box-shadow: 0 1px 3px rgba(17, 24, 39, 0.04);
+    border: 2px solid #E5E7EB;
+    border-radius: 32px;
+    padding: 28px 28px 32px;
+    box-shadow: 0 2px 6px rgba(17, 24, 39, 0.04);
   }}
   .group-header {{
     display: flex;
     align-items: center;
     justify-content: space-between;
-    padding: 2px 2px 10px 10px;
-    margin-bottom: 10px;
-    border-bottom: 1px solid #F3F4F6;
-    border-left: 4px solid #4F46E5;
-    min-height: 44px;
+    padding: 4px 4px 20px 20px;
+    margin-bottom: 20px;
+    border-bottom: 2px solid #F3F4F6;
+    border-left: 8px solid #4F46E5;
+    min-height: 88px;
   }}
-  .group-brand {{ display: flex; align-items: center; max-width: 310px; }}
-  .group-logo {{ max-height: 38px; max-width: 240px; width: auto; height: auto; object-fit: contain; display: block; }}
-  .group-title-text {{ font-size: 17px; font-weight: 700; color: #111827; }}
+  .group-brand {{ display: flex; align-items: center; max-width: 620px; }}
+  .group-logo {{ max-height: 76px; max-width: 480px; width: auto; height: auto; object-fit: contain; display: block; }}
+  .group-title-text {{ font-size: 34px; font-weight: 700; color: #111827; }}
   .group-count {{
-    font-size: 12px;
+    font-size: 24px;
     font-weight: 600;
     color: #6B7280;
     background: #F3F4F6;
-    padding: 2px 8px;
+    padding: 4px 16px;
     border-radius: 999px;
   }}
-  .persona-grid {{ display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }}
+  .persona-grid {{ display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }}
   .persona-item {{
     display: flex;
     align-items: center;
-    gap: 8px;
-    padding: 6px 10px;
-    border-radius: 10px;
+    gap: 16px;
+    padding: 12px 20px;
+    border-radius: 20px;
     background: #F9FAFB;
-    border: 1px solid #F1F3F5;
-    min-height: 48px;
+    border: 2px solid #F1F3F5;
+    min-height: 96px;
   }}
   .idx-pill {{
     flex-shrink: 0;
-    min-width: 26px;
-    height: 24px;
-    padding: 0 5px;
-    border-radius: 7px;
-    font-size: 12px;
+    min-width: 52px;
+    height: 48px;
+    padding: 0 10px;
+    border-radius: 14px;
+    font-size: 24px;
     font-weight: 700;
     font-variant-numeric: tabular-nums;
     display: inline-flex;
@@ -664,15 +749,15 @@ def render_persona_switch_html(
   }}
   .avatar-wrap {{
     flex-shrink: 0;
-    width: 36px;
-    height: 36px;
+    width: 72px;
+    height: 72px;
     display: flex;
     align-items: center;
     justify-content: center;
   }}
-  .avatar-img {{ max-width: 36px; max-height: 36px; width: auto; height: auto; object-fit: contain; display: block; }}
+  .avatar-img {{ max-width: 72px; max-height: 72px; width: auto; height: auto; object-fit: contain; display: block; }}
   .persona-name {{
-    font-size: 15px;
+    font-size: 30px;
     font-weight: 600;
     color: #111827;
     line-height: 1.25;
@@ -681,12 +766,12 @@ def render_persona_switch_html(
     text-overflow: ellipsis;
   }}
   .footer {{
-    margin-top: 18px;
-    padding: 0 2px;
+    margin-top: 36px;
+    padding: 0 4px;
     display: flex;
     align-items: center;
     justify-content: space-between;
-    font-size: 12px;
+    font-size: 24px;
     color: #6B7280;
   }}
 </style>

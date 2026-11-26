@@ -177,8 +177,9 @@ class PersonaPlus(Star):
         """
         umo = event.unified_msg_origin
         if self.pending_reset_store.contains(umo):
+            target_pid = self.user_store.get(umo) or DEFAULT_PERSONA_ID
             if await clear_session_conversation_history(
-                self.context, umo, DEFAULT_PERSONA_ID
+                self.context, umo, target_pid
             ):
                 self.pending_reset_store.discard(umo)
             mark_session_cleanup_extras(event)
@@ -942,7 +943,7 @@ class PersonaPlus(Star):
                         options={
                             "type": "png",
                             "full_page": True,
-                            "viewport": {"width": 1320, "height": 900},
+                            "viewport": {"width": 2640, "height": 1800},
                             "device_scale_factor": 2,
                         },
                     )

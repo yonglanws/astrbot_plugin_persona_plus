@@ -15,6 +15,70 @@ except ImportError:  # pragma: no cover - 仅老版本宿主会走到
 from .user_persona_store import GroupPersonaStore, PendingHistoryResetStore
 
 DEFAULT_PERSONA_ID = "晓山瑞希"
+_CONFLICT_RETRY_MAX_ATTEMPTS = 5
+_CONFLICT_RETRY_BASE_DELAY = 0.08
+_CONFLICT_RETRY_MAX_DELAY = 0.25
+
+
+def _is_conversation_conflict_error(exc: BaseException) -> bool:
+    """识别 AstrBot 4.30 ConversationStore 的乐观锁并发冲突异常。"""
+    if type(exc).__name__ == "ConversationConflictError":
+        return True
+    return "Conversation changed" in str(exc)
+
+
+async def _update_conversation_with_retry(
+    conv_mgr,
+    *,
+    umo: str,
+    cid: str,
+    persona_id: str,
+    history: list[dict] | None = None,
+    max_attempts: int = _CONFLICT_RETRY_MAX_ATTEMPTS,
+    base_delay: float = _CONFLICT_RETRY_BASE_DELAY,
+    max_delay: float = _CONFLICT_RETRY_MAX_DELAY,
+) -> bool:
+    """带退避重试调用 update_conversation，冲突时重新读取最新 cid 再提交。"""
+    current_cid = cid
+    for attempt in range(1, max(1, max_attempts) + 1):
+        try:
+            kwargs: dict = {
+                "unified_msg_origin": umo,
+                "conversation_id": current_cid,
+                "persona_id": persona_id,
+            }
+            if history is not None:
+                kwargs["history"] = history
+            await conv_mgr.update_conversation(**kwargs)
+            return True
+        except Exception as exc:  # noqa: BLE001
+            if _is_conversation_conflict_error(exc) and attempt < max_attempts:
+                delay = min(max_delay, base_delay * attempt)
+                logger.warning(
+                    "Persona+ 会话 %s 更新对话遇并发冲突（第 %d/%d 次），%.2fs 后重试",
+                    umo,
+                    attempt,
+                    max_attempts,
+                    delay,
+                )
+                await asyncio.sleep(delay)
+                try:
+                    refreshed_cid = await conv_mgr.get_curr_conversation_id(umo)
+                    if refreshed_cid:
+                        current_cid = refreshed_cid
+                except Exception:  # noqa: BLE001
+                    pass
+                continue
+            logger.warning(
+                "Persona+ 更新会话 %s 对话失败（attempt=%d/%d）: %s",
+                umo,
+                attempt,
+                max_attempts,
+                exc,
+                exc_info=not _is_conversation_conflict_error(exc),
+            )
+            return False
+    return False
 
 
 def mark_session_cleanup_extras(event: AstrMessageEvent | None) -> None:
@@ -36,14 +100,15 @@ async def clear_session_conversation_history(
     try:
         conv_mgr = context.conversation_manager
         cid = await conv_mgr.get_curr_conversation_id(umo)
-        if cid:
-            await conv_mgr.update_conversation(
-                unified_msg_origin=umo,
-                conversation_id=cid,
-                persona_id=persona_id,
-                history=[],
-            )
-        return True
+        if not cid:
+            return True
+        return await _update_conversation_with_retry(
+            conv_mgr,
+            umo=umo,
+            cid=cid,
+            persona_id=persona_id,
+            history=[],
+        )
     except Exception:  # noqa: BLE001
         logger.warning("Persona+ 清空会话 %s 对话历史失败", umo, exc_info=True)
         return False
@@ -64,7 +129,8 @@ async def switch_persona(
     采用与内置 /reset 一致的做法：先终止该会话正在进行的事件与
     Agent 生成，再把当前对话的历史清空并绑定新人格。若不先终止，
     生成中的请求结束时会把旧人格的历史原样写回，导致"前缀是新
-    人格、内容还是旧人格"的错位。
+    人格、内容还是旧人格"的错位；若仍遇乐观锁并发冲突，退避重试后
+    兜底登记待清理队列，保证绝不中断切换且不向用户抛异常。
     """
     await persona_mgr.get_persona(persona_id)
 
@@ -75,16 +141,35 @@ async def switch_persona(
 
     conv_mgr = context.conversation_manager
     cid = await conv_mgr.get_curr_conversation_id(umo)
+    history_cleared = True
     if cid:
-        await conv_mgr.update_conversation(
-            unified_msg_origin=umo,
-            conversation_id=cid,
+        history_cleared = await _update_conversation_with_retry(
+            conv_mgr,
+            umo=umo,
+            cid=cid,
             persona_id=persona_id,
             history=[],
         )
-        logger.info(
-            "Persona+ %s 已切换至人格 %s（清空当前对话 %s）", umo, persona_id, cid
-        )
+        if history_cleared:
+            logger.info(
+                "Persona+ %s 已切换至人格 %s（清空当前对话 %s）", umo, persona_id, cid
+            )
+        else:
+            if update_overrides is not None:
+                path, _ = _persona_override_target(context, umo)
+                try:
+                    await update_overrides(umo, {path: persona_id})
+                except Exception:  # noqa: BLE001
+                    logger.warning(
+                        "Persona+ %s 并发冲突后补写 override 失败", umo, exc_info=True
+                    )
+            if pending_reset_store is not None:
+                pending_reset_store.add_many([umo])
+            logger.warning(
+                "Persona+ %s 切换至人格 %s 遇持续并发冲突，已登记懒清理兜底",
+                umo,
+                persona_id,
+            )
     else:
         new_cid = await conv_mgr.new_conversation(
             unified_msg_origin=umo,
@@ -96,19 +181,16 @@ async def switch_persona(
         # 不写 override。这里复用 update_conversation：源码里
         # persona_id 非空即调用 update_overrides，使新建与已有对话
         # 两条路径口径一致，避免正文/TTS 仍是默认人格。
-        try:
-            await conv_mgr.update_conversation(
-                unified_msg_origin=umo,
-                conversation_id=new_cid,
-                persona_id=persona_id,
-            )
-        except Exception:  # noqa: BLE001
-            logger.warning(
-                "Persona+ %s 新建对话后写入人格 override 失败", umo, exc_info=True
-            )
+        if not await _update_conversation_with_retry(
+            conv_mgr,
+            umo=umo,
+            cid=new_cid,
+            persona_id=persona_id,
+        ):
+            logger.warning("Persona+ %s 新建对话后写入人格 override 失败", umo)
         logger.info("Persona+ %s 已切换至人格 %s（新建对话）", umo, persona_id)
 
-    if pending_reset_store is not None:
+    if history_cleared and pending_reset_store is not None:
         pending_reset_store.discard(umo)
     mark_session_cleanup_extras(event)
 
