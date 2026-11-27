@@ -1150,7 +1150,7 @@ class PersonaPlus(Star):
             "STREAMING_FINISH",
         }
 
-    @filter.on_decorating_result(priority=999)
+    @filter.on_decorating_result(priority=80)
     async def on_decorating_result(self, event: AstrMessageEvent):
         """给 LLM 回复加人格前缀，每轮对话最多一次。
 
@@ -1160,6 +1160,8 @@ class PersonaPlus(Star):
         前缀，一轮就会出现多个 [人格] 前缀（配合分段回复更明显）。
         因此这里以 event 级标记保证一轮只加一次，并且只装饰 LLM 结果，
         不碰插件自己发出的消息与工具状态消息。
+        优先级设为 80，确保在 meme_manager_lite(500) 拆出 Image 段之后执行，
+        跳过图片与空白段，仅拼接到首个非空正文 Plain 段头部。
         """
         if not event.get_extra("_persona_plus_llm"):
             return
@@ -1179,9 +1181,14 @@ class PersonaPlus(Star):
 
             prefix = f"[{persona_id}]"
             for component in result.chain:
-                if isinstance(component, Comp.Plain) and component.text.strip():
-                    if not component.text.startswith(prefix):
-                        component.text = f"{prefix}{component.text}"
+                if isinstance(component, Comp.Plain):
+                    body = component.text.lstrip()
+                    if not body:
+                        continue
+                    if not body.startswith(prefix):
+                        component.text = f"{prefix}{body}"
+                    else:
+                        component.text = body
                     event.set_extra("_persona_plus_prefixed", True)
                     break
         except Exception:  # noqa: BLE001
